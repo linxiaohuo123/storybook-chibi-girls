@@ -16,7 +16,7 @@
 - `agents/` — Skill 元信息。
 - `scripts/` — 格式、白底与角色差异检查工具。
 - `tests/` — 回归测试。
-- `assets/references/` — 用户提供的风格参考素材（如已上传）。
+- `assets/references/` — 四张用户参考图的 WebP 缩略预览（非原始分辨率），包含一张深色配色反例。
 
 ## 验证
 
@@ -35,3 +35,12 @@ python3 scripts/check_diversity.py --plan /path/to/plan.json
 ## 公共仓库与素材
 
 本仓库是公开的。任何用户提供的参考图片，仅用作风格研究；文件公开可见不代表已获得第三方版权、再分发或商业使用许可。未附加统一开源许可证。
+
+## 随附参考预览
+
+- [多角色系列参考](assets/references/series-variety.webp)
+- [跨主题角色参考](assets/references/theme-variety.webp)
+- [苹果主题服装参考](assets/references/apple-detail-reference.webp)
+- [深色配色反例](assets/references/dark-palette-counterexample.webp)
+
+**注意：** 图片仅为角色设计的视觉参考与缩略预览。公开仓库不代表这些作品附带再授权许可；如需商用或二次分发，应另行确认权利来源。
