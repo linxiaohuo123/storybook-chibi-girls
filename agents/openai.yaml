@@ -1,0 +1,13 @@
+interface:
+  display_name: 童话 Q 版少女
+  short_description: 生成白底方图少女角色，固定平涂发色、协调配色、干净线稿与主题差异
+  default_prompt: 使用 $storybook-chibi-girls 生成一张有鲜明主题、配色协调、线条干净的 1:1 白底全身 Q 版少女图。
+  icon_small: assets/icon.svg
+  icon_large: assets/icon.svg
+policy:
+  products:
+  - chatgpt
+  - codex
+  - api
+  - atlas
+  allow_implicit_invocation: true
