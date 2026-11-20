@@ -1,7 +1,4 @@
-"""Runnable regression cases for the two read-only checks and white-background helper.
-
-Run: python3 -m unittest discover -s tests -v
-"""
+"""Regression checks for history eligibility and read-only border screening."""
 
 import json
 import subprocess
@@ -10,104 +7,185 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
+
 
 ROOT = Path(__file__).resolve().parents[1]
-DIVERSE = ROOT/'scripts/check_diversity.py'
-IMAGE = ROOT/'scripts/check_image.py'
-WHITEN = ROOT/'scripts/normalize_white_background.py'
 
 
-def run(*args):
-    proc = subprocess.run([sys.executable, *map(str,args)],capture_output=True,text=True)
-    try: data=json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        raise AssertionError(f'Not JSON output: {proc.stdout}, stderr={proc.stderr}')
-    return proc.returncode, data
+def character(identifier="new", suffix=""):
+    return {
+        "id": identifier, "theme": "moon" + suffix,
+        "hair_style": "bob" + suffix, "hair_color": "brown" + suffix,
+        "outfit_silhouette": "cape" + suffix, "signature_prop": "book" + suffix,
+        "pose": "standing" + suffix, "expression": "smile" + suffix,
+        "palette_id": "blue" + suffix,
+    }
 
 
-class SkillChecks(unittest.TestCase):
+class RegressionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.folder = Path(self.temp.name)
-        self.char = dict(id='first',theme='postgirl',hair_style='bob',hair_color='brown',outfit_silhouette='dress',signature_prop='envelope',pose='standing',expression='smile',palette_id='warm')
-        self.plan = self.folder/'plan.json'
-        self.plan.write_text(json.dumps({'mode':'new_character','characters':[self.char]}))
-        self.history = self.folder/'accepted.jsonl'
+        self.directory = Path(self.temp.name)
 
-    def history_record(self, **fields):
-        record={**self.char,'id':'second',**fields}
-        self.history.write_text(json.dumps(record)+'\n')
+    def run_script(self, name, *args):
+        result = subprocess.run(
+            [sys.executable, "-B", str(ROOT / "scripts" / name), *map(str, args)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertTrue(result.stdout, result.stderr)
+        return result.returncode, json.loads(result.stdout)
 
-    def test_unreviewed_history_is_skipped(self):
-        self.history_record()
-        code,data=run(DIVERSE,'--plan',self.plan,'--history',self.history)
-        self.assertEqual(code,0)
-        self.assertEqual(data['history_records_skipped'],1)
-        self.assertEqual(data['history_records_used'],0)
-        self.assertIsNone(data['diversity_checks_passed'])
+    def check_plan(self, characters=None, history=None, mode="new_character"):
+        plan = self.directory / "plan.json"
+        plan.write_text(json.dumps({"mode": mode, "characters": characters or [character()]}), encoding="utf-8")
+        args = ["--plan", plan]
+        if history is not None:
+            history_path = self.directory / "history.jsonl"
+            history_path.write_text(history, encoding="utf-8")
+            args.extend(["--history", history_path])
+        return self.run_script("check_diversity.py", *args)
 
-    def test_accepted_history_is_checked(self):
-        self.history_record(quality_status='passed')
-        code,data=run(DIVERSE,'--plan',self.plan,'--history',self.history)
-        self.assertEqual(code,1)
-        self.assertEqual(data['collisions'][0]['scope'],'loaded_history')
+    def test_unreviewed_and_conflicting_history_is_skipped(self):
+        markers = [
+            {}, {"visual_review": "not_reviewed"},
+            {"quality_status": "passed", "visual_review": "failed"},
+            {"quality_status": "failed", "visual_review": {"status": "passed"}},
+            {"quality_status": "passed", "quality": {"status": "failed"}},
+            {"quality_status": "passed", "quality": "not_reviewed"},
+            {"quality_status": "passed", "visual_review": {}},
+            {"client_status": "accepted"},
+        ]
+        for marker in markers:
+            with self.subTest(marker=marker):
+                code, result = self.check_plan(history=json.dumps({**character("old"), **marker}))
+                self.assertEqual(code, 0)
+                self.assertEqual(result["history_records_used"], 0)
+                self.assertEqual(result["history_records_skipped"], 1)
+                self.assertIsNone(result["diversity_checks_passed"])
+                self.assertEqual(result["history_coverage"], "no_eligible_records")
 
-    def test_contradictory_quality_is_skipped(self):
-        self.history_record(quality_status='failed', visual_review={'status':'passed'})
-        code,data=run(DIVERSE,'--plan',self.plan,'--history',self.history)
-        self.assertEqual(code,0)
-        self.assertEqual(data['history_records_skipped'],1)
+    def test_visual_pass_is_not_client_acceptance(self):
+        history = {**character("old"), "quality_status": "passed"}
+        code, result = self.check_plan(history=json.dumps(history))
+        self.assertEqual(code, 1)  # A genuinely colliding visual-history record.
+        self.assertEqual(result["history_records_used"], 1)
+        self.assertEqual(result["history_records_client_accepted"], 0)
+        self.assertEqual(result["history_client_status_counts"]["unknown"], 1)
 
-    def test_missing_requested_history_is_error(self):
-        code,data=run(DIVERSE,'--plan',self.plan,'--history',self.folder/'missing.jsonl')
-        self.assertEqual(code,2)
-        self.assertEqual(data['status'],'error')
+    def test_batch_and_history_coverage_are_separate(self):
+        history = {**character("old", "history"), "visual_review": {"status": "passed"}, "client_status": "accepted"}
+        code, result = self.check_plan([character("one"), character("two", "other")], json.dumps(history))
+        self.assertEqual(code, 0)
+        self.assertEqual(result["batch_pairs_checked"], 1)
+        self.assertEqual(result["history_pairs_checked"], 2)
+        self.assertEqual(result["pairs_checked"], 3)
+        self.assertEqual(result["history_records_client_accepted"], 1)
+        self.assertEqual(result["comparison_coverage"], "exact_strings_only")
 
-    def test_edit_mode_skips_diversity(self):
-        self.plan.write_text(json.dumps({'mode':'edit','characters':[self.char]}))
-        code,data=run(DIVERSE,'--plan',self.plan,'--history',self.folder/'missing.jsonl')
-        self.assertEqual(code,0)
-        self.assertEqual(data['status'],'not_applicable')
+    def test_distinct_history_revisions_are_all_compared(self):
+        versions = [
+            {**character("old"), "quality_status": "passed", "revision_id": "v1"},
+            {**character(" OLD "), "quality_status": "passed", "revision_id": "v2"},
+        ]
+        code, result = self.check_plan(history="\n".join(map(json.dumps, versions)))
+        self.assertEqual(code, 1)  # Both versions collide with the new design.
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["history_records_used"], 2)
+        self.assertEqual(result["history_pairs_checked"], 2)
+        self.assertEqual({item["second_revision_id"] for item in result["collisions"]}, {"v1", "v2"})
 
-    def test_near_white_is_not_exact_white(self):
-        p=self.folder/'near-white.png'
-        im=Image.new('RGB',(128,128),(253,254,255))
-        for x in range(32,96):
-            for y in range(32,96): im.putpixel((x,y),(190,100,70))
-        im.save(p)
-        code,data=run(IMAGE,p,'--require-exact-white-border')
-        self.assertEqual(code,1)
-        self.assertIn('border_not_exact_white',data['issues'])
+    def test_repeated_history_ids_need_nonempty_unique_revisions(self):
+        invalid_versions = [
+            ({}, {"revision_id": "v2"}),
+            ({"revision_id": "v1"}, {"revision_id": " "}),
+            ({"revision_id": "v1"}, {"revision_id": 2}),
+            ({"revision_id": "v1"}, {"revision_id": " V1 "}),
+        ]
+        for first, second in invalid_versions:
+            with self.subTest(first=first, second=second):
+                versions = [{**character("old"), "quality_status": "passed", **marker}
+                            for marker in (first, second)]
+                code, result = self.check_plan(history="\n".join(map(json.dumps, versions)))
+                self.assertEqual(code, 2)
+                self.assertEqual(result["status"], "error")
+                self.assertIn("revision_id", result["error"])
 
-    def test_safe_background_normalization(self):
-        p=self.folder/'near-white.png'; out=self.folder/'white.png'
-        im=Image.new('RGB',(128,128),(253,254,255))
-        for x in range(32,96):
-            for y in range(32,96): im.putpixel((x,y),(190,100,70))
-        im.save(p)
-        code,data=run(WHITEN,p,out)
-        self.assertEqual(code,0,data)
-        self.assertEqual(Image.open(out).getpixel((0,0)),(255,255,255))
-        self.assertEqual(Image.open(out).getpixel((60,60)),(190,100,70))
-        code,data=run(IMAGE,out,'--require-exact-white-border')
-        self.assertEqual(code,0,data)
+    def test_revisions_do_not_allow_duplicate_plan_or_reused_character_ids(self):
+        versions = [
+            {**character("old"), "quality_status": "passed", "revision_id": "v1"},
+            {**character("old"), "quality_status": "passed", "revision_id": "v2"},
+        ]
+        code, result = self.check_plan(characters=versions)
+        self.assertEqual(code, 2)
+        self.assertIn("Duplicate id in plan", result["error"])
+        code, result = self.check_plan(characters=[character("old", "new design")],
+                                       history="\n".join(map(json.dumps, versions)))
+        self.assertEqual(code, 2)
+        self.assertIn("already exists in history", result["error"])
 
-    def test_refuses_dark_screen_capture(self):
-        p=self.folder/'dark-frame.png'; out=self.folder/'white.png'
-        Image.new('RGB',(128,128),(20,20,20)).save(p)
-        code,data=run(WHITEN,p,out)
-        self.assertEqual(code,2)
-        self.assertFalse(out.exists())
+    def test_explicit_missing_history_errors(self):
+        self.check_plan()
+        code, result = self.run_script("check_diversity.py", "--plan", self.directory / "plan.json", "--history", self.directory / "missing.jsonl")
+        self.assertEqual(code, 2)
+        self.assertEqual(result["status"], "error")
 
-    def test_refuses_transparency(self):
-        p=self.folder/'transparent.png'; out=self.folder/'white.png'
-        im=Image.new('RGBA',(128,128),(254,254,254,255)); im.putpixel((0,0),(254,254,254,0));im.save(p)
-        code,data=run(WHITEN,p,out)
-        self.assertEqual(code,2)
-        self.assertFalse(out.exists())
+    def test_bad_history_line_errors_with_line_number(self):
+        code, result = self.check_plan(history="\n{bad json}")
+        self.assertEqual(code, 2)
+        self.assertIn("line 2", result["error"])
+
+    def test_invalid_client_status_does_not_crash(self):
+        code, result = self.check_plan(history=json.dumps({**character("old"), "quality_status": "passed", "client_status": []}))
+        self.assertEqual(code, 2)
+        self.assertEqual(result["status"], "error")
+
+    def test_edit_needs_no_new_character_axes_or_history(self):
+        self.check_plan([{"id": "existing"}], mode="edit")
+        code, result = self.run_script("check_diversity.py", "--plan", self.directory / "plan.json", "--history", self.directory / "missing.jsonl")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "not_applicable")
+        self.assertEqual(result["history_status"], "not_applicable")
+        self.assertIsNone(result["diversity_checks_passed"])
+
+    def test_single_character_has_no_pairwise_evidence(self):
+        code, result = self.check_plan()
+        self.assertEqual(code, 0)
+        self.assertEqual(result["comparison_coverage"], "none")
+        self.assertEqual(result["history_coverage"], "not_requested")
+        self.assertIsNone(result["diversity_checks_passed"])
+
+    def image_fixture(self, background=(255, 255, 255)):
+        path = self.directory / "image.png"
+        image = Image.new("RGB", (100, 100), background)
+        ImageDraw.Draw(image).rectangle((30, 20, 70, 80), fill=(160, 100, 90))
+        image.save(path)
+        return path, image
+
+    def test_near_white_remains_compatible_but_fails_exact_check(self):
+        path, _ = self.image_fixture((252, 252, 252))
+        before = path.read_bytes()
+        code, result = self.run_script("check_image.py", path)
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "needs_visual_review")
+        code, result = self.run_script("check_image.py", path, "--require-exact-white-border")
+        self.assertEqual(code, 1)
+        self.assertIn("border_not_exact_white", result["issues"])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_exact_border_requires_every_pixel_and_never_claims_visual_pass(self):
+        path, image = self.image_fixture()
+        code, result = self.run_script("check_image.py", path, "--require-exact-white-border")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "needs_visual_review")
+        self.assertEqual(result["border_exact_white_fraction"], 1.0)
+        image.putpixel((0, 0), (254, 254, 254))
+        image.save(path)
+        code, result = self.run_script("check_image.py", path, "--require-exact-white-border")
+        self.assertEqual(code, 1)
+        self.assertIn("border_not_exact_white", result["issues"])
 
 
-if __name__=='__main__':
+if __name__ == "__main__":
     unittest.main()

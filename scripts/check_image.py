@@ -31,12 +31,12 @@ def main():
     parser.add_argument("--min-white-border", type=float, default=0.95,
                         help="Heuristic minimum near-white border fraction (default 0.95).")
     parser.add_argument("--require-exact-white-border", action="store_true",
-                        help="Also require >=99.5%% of the outer border band pixels to be exactly RGB 255,255,255.")
+                        help="Require every sampled outer-border pixel to be RGB 255,255,255; not a whole-background test.")
     args = parser.parse_args()
     if not 0 <= args.white_tolerance <= 32 or not 0 <= args.min_white_border <= 1:
         parser.error("white-tolerance must be 0..32; min-white-border must be 0..1")
 
-    base = {"schema_version": 1, "image": str(args.image),
+    base = {"schema_version": 2, "image": str(args.image),
             "visual_review_required": VISUAL_CHECKS}
     try:
         from PIL import Image, ImageChops
@@ -90,7 +90,7 @@ def main():
         issues.append("no_nonwhite_content_detected")
     if white_fraction < args.min_white_border:
         issues.append("border_not_sufficiently_near_white")
-    if args.require_exact_white_border and exact_white_fraction < 0.995:
+    if args.require_exact_white_border and exact_white_border != border_count:
         issues.append("border_not_exact_white")
     margins = None
     if bbox:
@@ -106,6 +106,7 @@ def main():
           "border_near_white_fraction": round(white_fraction, 6),
           "border_exact_white_fraction": round(exact_white_fraction, 6),
           "exact_white_border_enforced": args.require_exact_white_border,
+          "minimum_exact_white_border_fraction": 1.0 if args.require_exact_white_border else None,
           "foreground_bbox_xyxy": list(bbox) if bbox else None,
           "foreground_margins_px": margins, "issues": issues, "notes": notes})
     return 1 if issues else 0
